@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>モンスター判別</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin:0; background:#111; color:#eee; }
+    .center { display:flex; align-items:center; justify-content:center; height:100vh; flex-direction:column; gap:12px; padding:16px; box-sizing:border-box; }
+    #videoContainer { position:relative; width:640px; max-width:95%; }
+    video { width:100%; height:auto; border-radius:8px; background:#000; }
+    .controls { display:flex; gap:8px; justify-content:center; margin-top:8px; }
+    button { padding:8px 12px; border-radius:8px; border: none; cursor:pointer; font-weight:600; }
+    button.primary { background:#2b8cff; color:white; }
+    button.ghost { background:transparent; color:#ddd; border:1px solid rgba(255,255,255,0.06); }
+    /* 右下のモンスターカード */
+    .monster-card {
+      position:fixed;
+      right:80px;
+      bottom:16px;
+      width:220px;
+      max-width:40vw;
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.6));
+      border-radius:12px;
+      padding:8px;
+      display:flex;
+      gap:8px;
+      align-items:center;
+      transform-origin:100% 100%;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+      transition: transform .25s ease, opacity .25s ease;
+      z-index:1000;
+    }
+    .monster-card.hidden { opacity:0; transform: translateY(20px) scale(.98); pointer-events:none; }
+    .monster-thumb { width:160px; height:160px; border-radius:12px; object-fit:cover; background:#222; }
+    .monster-info { flex:1; min-width:0; color:#fff; }
+    .monster-name { font-size:14px; font-weight:700; line-height:1.1; }
+    .monster-actions { display:flex; gap:6px; margin-top:6px; }
+    .small-btn { font-size:12px; padding:6px 8px; border-radius:8px; background:rgba(255,255,255,0.06); color:#fff; border:none; cursor:pointer; }
+    .reset-btn {
+      position:fixed; left:16px; bottom:16px;
+      background:#ff4d4f; color:white; border:none; padding:10px 14px; border-radius:12px;
+      font-weight:700; box-shadow: 0 6px 20px rgba(0,0,0,0.4); cursor:pointer; z-index:1000;
+    }
+    .label { font-size:13px; color:#bbb; margin-top:6px; text-align:center; }
+    .status { margin-top:8px; color:#bcd; font-size:13px; text-align:center; max-width:640px; word-break:break-word; }
+    .meta { font-size:12px; color:#99a; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div class="center">
+    <h1>モンスター判別</h1>
+    <div id="videoContainer">
+      <video id="webcam" autoplay playsinline muted></video>
+    </div>
+
+    <div class="controls">
+      <button id="startBtn" class="primary" disabled>Start Camera</button>
+      <button id="stopBtn" class="ghost">Stop Camera</button>
+    </div>
+    <div class="label">右下に検出モンスターが表示されます。左下の赤いボタンでリセット。（Rキーでもリセット）</div>
+    <div id="status" class="status">モデル読み込み待ち…</div>
+    <div class="meta">model.json / metadata.json / weights.bin を同フォルダに置いてください。</div>
+  </div>
+
+  <!-- 右下 モンスターカード -->
+  <div id="monsterCard" class="monster-card hidden" aria-hidden="true">
+    <img id="monsterImg" class="monster-thumb" src="" alt="monster"/>
+    <div class="monster-info">
+      <div id="monsterName" class="monster-name">Monster</div>
+      <div class="monster-actions">
+        <button id="openDetail" class="small-btn" title="詳細画像を新しいタブで開く">Open</button>
+        <button id="prevBtn" class="small-btn">◀</button>
+        <button id="nextBtn" class="small-btn">▶</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 左下 リセット -->
+  <button id="resetBtn" class="reset-btn">Reset</button>
+
+  <!-- TensorFlow.js（Teachable Machine が内部で使う） -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+
+  <!-- Teachable Machine image library -->
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+
+  <script>
+    (function(){
+    const MODEL_JSON_URL = "model.json";
+    const METADATA_JSON_URL = "metadata.json";
+
+    
+    const CLASS_TO_IMAGES = {
+  "アジャラカン": {
+    thumb: "./images/ajarakan_thumb.jpg",
+    detail: "./images/ajarakan_weak.png"
+  },
+  "アルシュベルド": {
+    thumb: "./images/alshubeld._thumb.jpg",
+    detail: "./images/alshubeld_weak.png"
+  },
+  "ウズトゥナ": {
+    thumb: "./images/uzutuna_thumb.jpg",
+    detail: "./images/uzutuna_weak.png"
+  },
+  "シーウー": {
+    thumb: "./images/shiwu_thumb.jpg",
+    detail: "./images/shiwu_weak.png"
+  },
+  "ジンダハド": {
+    thumb: "./images/jindahad_thumb.jpg",
+    detail: "./images/jindahad_weak.png"
+  },
+  "ゾシア": {
+    thumb: "./images/zoshia_thumb.jpg",
+    detail: "./images/zoshia_weak.png"
+  },
+  "ドシャグマ": {
+    thumb: "./images/doshaguma_thumb.jpg",
+    detail: "./images/doshaguma_weak.png"
+ },
+ "ヌエグドラ": {
+    thumb: "./images/nuegudora_thumb.jpg",
+    detail: "./images/nuegudora_weak.png"
+ },
+ "バーラハーラ": {
+    thumb: "./images/barahara_thumb.jpg",
+    detail: "./images/barahara_weak.png"
+ },
+ "ヒラバミ": {
+    thumb: "./images/hirabami_thumb.jpg",
+    detail: "./images/hirabami_weak.png"
+ },
+ "ププロポル": {
+    thumb: "./images/pupuroporu_thumb.jpg",
+    detail: "./images/pupuroporu_weak.png"
+ },
+  "ドシャグマ": {
+    thumb: "./images/doshaguma_thumb.jpg",
+    detail: "./images/doshaguma_weak.png"
+ },
+ "ヌエグドラ": {
+    thumb: "./images/nuegudora_thumb.jpg",
+    detail: "./images/nuegudora_weak.png"
+ },
+ "バーラハーラ": {
+    thumb: "./images/barahara_thumb.jpg",
+    detail: "./images/barahara_weak.png"
+ },
+ "ヒラバミ": {
+    thumb: "./images/hirabami_thumb.jpg",
+    detail: "./images/hirabami_weak.png"
+ },
+ "ププロポル": {
+    thumb: "./images/puporopol_thumb.jpg",
+    detail: "./images/puporopol_weak.png"
+ },
+ "バーラハーラ": {
+    thumb: "./images/baarahaara_thumb.jpg",
+    detail: "./images/baarahaara_weak.png"
+  },
+  "チャタカブラ": {
+    thumb: "./images/chatakabura_thumb.jpg",
+    detail: "./images/chatakabura_weak.png"
+  },
+  "ケマトリス": {
+    thumb: "./images/kematorisu_thumb.jpg",
+    detail: "./images/kematorisu_weak.png"
+  },
+  "ラバラバリナ": {
+    thumb: "./images/rabarabarina_thumb.jpg",
+    detail: "./images/rabarabarina_weak.png"
+  }
+};
+
+
+    const CONFIDENCE_THRESHOLD = 0.85;
+    const POLL_INTERVAL = 250;
+
+    let model = null;
+    let webcamStream = null;
+    let detectTimer = null;
+    let recognitionLocked = false;
+    let currentDetectedClass = null;
+    let showingDetail = false;
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn  = document.getElementById("stopBtn");
+    const statusEl = document.getElementById("status");
+    const webcamEl = document.getElementById("webcam");
+    const monsterCard = document.getElementById("monsterCard");
+    const monsterImg = document.getElementById("monsterImg");
+    const monsterName = document.getElementById("monsterName");
+    const openDetail = document.getElementById("openDetail");
+    const prevBtn = document.getElementById("prevBtn");
+    const nextBtn = document.getElementById("nextBtn");
+    const resetBtn = document.getElementById("resetBtn");
+
+    function placeholderFor(name){ return "https://placehold.co/400x400?text=" + encodeURIComponent(name || "No+Image"); }
+
+    async function loadModel(){
+      statusEl.textContent = "モデル読み込み中...";
+      try {
+        model = await tmImage.load(MODEL_JSON_URL, METADATA_JSON_URL);
+        statusEl.textContent = "モデル読み込み完了。Start を押してください。";
+        startBtn.disabled = false;
+      } catch (e){
+        console.error("loadModel error", e);
+        statusEl.textContent = "モデル読み込み失敗: " + (e && e.message ? e.message : String(e));
+        startBtn.disabled = true;
+      }
+    }
+
+    async function startCamera(){
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      alert("カメラが利用できません。対応ブラウザで開いてください。");
+      return;
+    }
+
+    const constraintsList = [
+      { video: { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+      { video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+      { video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+      { video: true, audio: false }
+    ];
+
+    for (const c of constraintsList){
+      try {
+        webcamStream = await navigator.mediaDevices.getUserMedia(c);
+        break;
+      }   catch (e) {
+      // 失敗したら次へ
+        console.log("getUserMedia failed:", c, e);
+      }
+    }
+
+  if (!webcamStream) {
+    statusEl.textContent = "カメラにアクセスできません（拒否または未接続）。";
+    return;
+  }
+
+  try {
+    webcamEl.srcObject = webcamStream;
+
+    // ★ iPhone/Safari 対策
+    webcamEl.setAttribute("playsinline", "");
+    webcamEl.muted = true;
+
+    await webcamEl.play();
+    statusEl.textContent = "カメラ動作中。認識を待っています...";
+    startDetectLoop();
+  } catch (e){
+    console.error(e);
+    statusEl.textContent = "カメラ再生失敗。";
+  }
+}
+    function startDetectLoop(){
+      if (!model) { statusEl.textContent = "モデル未読み込み"; return; }
+      if (detectTimer) clearInterval(detectTimer);
+      recognitionLocked = false;
+      currentDetectedClass = null;
+      detectTimer = setInterval(async () => {
+        if (recognitionLocked) return;
+        if (!webcamEl || webcamEl.readyState < 2) return;
+        try {
+          const prediction = await model.predict(webcamEl);
+          let top = { className: null, probability: 0 };
+          for (const p of prediction) {
+            if (p.probability > top.probability) top = { className: p.className, probability: p.probability };
+          }
+          if (top.className && top.probability >= CONFIDENCE_THRESHOLD) {
+            if (top.className === "人間") {
+              statusEl.textContent = "認識中…（人間は無視）";
+              return;
+            }
+
+            onMonsterDetected(top.className, top.probability);
+          } else {
+            statusEl.textContent = `認識中…（上位: ${top.className ?? "なし"} ${(top.probability*100).toFixed(1)}%）`;
+          }
+        } catch (e) {
+          console.error("predict error", e);
+          statusEl.textContent = "予測中にエラーが発生しました。コンソールを確認してください。";
+        }
+      }, POLL_INTERVAL);
+    }
+
+    function stopDetectLoop(){
+      if (detectTimer) { clearInterval(detectTimer); detectTimer = null; }
+    }
+
+    function onMonsterDetected(className, prob){
+      recognitionLocked = true;
+      currentDetectedClass = className;
+      showingDetail = false;
+      statusEl.textContent = `検出: ${className} （${(prob*100).toFixed(1)}%）`;
+      showMonsterCard(className);
+    }
+
+    function showMonsterCard(className){
+  const mapping = CLASS_TO_IMAGES[className] || {};
+
+  // ★ 修正後：まずサムネ（thumb）を表示
+  const imgUrl = mapping.thumb || mapping.detail || placeholderFor(className);
+
+  monsterImg.src = imgUrl;
+  monsterImg.alt = className;
+  monsterName.textContent = className;
+
+  monsterCard.classList.remove("hidden");
+  monsterCard.setAttribute("aria-hidden","false");
+
+  // Openボタンは弱点表を開きたいならこのままでOK
+  openDetail.dataset.url = mapping.detail || mapping.thumb || imgUrl;
+}
+
+
+
+    function hideMonsterCard(){
+      monsterCard.classList.add("hidden");
+      monsterCard.setAttribute("aria-hidden","true");
+      monsterImg.src = "";
+      monsterName.textContent = "";
+      openDetail.dataset.url = "";
+    }
+
+    function toggleMonsterDetail(){
+      if (!currentDetectedClass) return;
+      showingDetail = !showingDetail;
+      const mapping = CLASS_TO_IMAGES[currentDetectedClass] || {};
+      const newUrl = showingDetail ? (mapping.detail || mapping.thumb) : (mapping.thumb || mapping.detail);
+      if (newUrl) monsterImg.src = newUrl;
+    }
+    function nextImage(){ toggleMonsterDetail(); }
+    function prevImage(){ toggleMonsterDetail(); }
+
+    function resetRecognition(){
+      recognitionLocked = false;
+      currentDetectedClass = null;
+      showingDetail = false;
+      hideMonsterCard();
+      statusEl.textContent = "リセットしました。カメラにモンスターを見せてください。";
+    }
+
+    startBtn.addEventListener("click", async () => {
+      if (!model) { await loadModel(); }
+      await startCamera();
+    });
+    stopBtn.addEventListener("click", () => stopCamera());
+    openDetail.addEventListener("click", () => {
+      const url = openDetail.dataset.url;
+      if (url) window.open(url, "_blank");
+      else alert("詳細画像が設定されていません。");
+    });
+    nextBtn.addEventListener("click", () => nextImage());
+    prevBtn.addEventListener("click", () => prevImage());
+    resetBtn.addEventListener("click", () => resetRecognition());
+    window.addEventListener("beforeunload", () => stopCamera());
+    window.addEventListener("keydown", (e) => { if (e.key === "r" || e.key === "R") resetRecognition(); });
+
+    (async () => {
+      try { await loadModel(); } catch(e) {}
+    })();
+
+  })();
+  </script>
+</body>
+</html>
+
+
